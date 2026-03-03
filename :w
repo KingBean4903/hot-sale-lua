@@ -1,0 +1,78 @@
+import { Redis } from 'ioredis';
+import fs from 'fs';
+
+const redis_url = process.env.REDIS_URL as string;
+
+const activeSales = ['fs_123']
+
+const redis =  new Redis();
+
+const REAP_INTERVAL_MS = 1000;
+
+const RELEASE_STOCK_LUA = fs.readFileSync(
+`./src/redis/scripts/releaseStock.lua`,
+								'utf8'
+);
+
+const releaseStockSha = await redis.script("LOAD", RELEASE_STOCK_LUA);
+
+const addReservation = async({ saleId, reservationId, ttlMs }) => {
+								const expiresAt = Date.now() + ttlMs;
+								
+								await redis.zadd(
+																`flashsale:${saleId}:reservations`,
+																expiresAt, reservationId);
+}
+
+await addReservation({
+								saleId: 'fs_123',
+								reservationId: 'res_8799',
+								ttlMs: 10_000
+});
+
+/*const map = {
+								'available': 3,
+								'reserved': 2
+};
+
+await redis.hset('flashsale:fs_123:reservations', map); */
+
+const reapExpired = async (saleId) => {
+
+								const now = Date.now();
+
+								const expired = await redis.zrangebyscore(
+																`flashsale:${saleId}:reservations`,
+																0,
+																now
+								)
+
+								for (const reservationId of expired) {
+																await evalReleaseStock(`flashsale:${saleId}:reservations`)
+																await redis.zrem(
+																								`flashsale:${saleId}:reservations`,
+																								reservationId
+																)
+								}
+}
+
+const evalReleaseStock = async (keys) => {
+
+								try { 
+																await redis.evalsha(releaseStockSha, 1, keys, 1 );
+								} catch(err) {
+																if (err.message.includes('NOSCRIPT')) {
+																								const releaseStockSha = await redis.script("LOAD", RELEASE_STOCK_LUA)
+																								await redis.evalsha(releaseStockSha, 1, keys, 1 );
+																} else {
+																								throw err
+																}
+								}
+}
+
+setInterval(async () => {
+
+								for(const saleId of activeSales) {
+																await reapExpired(saleId);
+								}
+}, REAP_INTERVAL_MS)
